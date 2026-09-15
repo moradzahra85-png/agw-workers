@@ -1,5 +1,29 @@
 name: AGW Worker AGY Issue Bot (same-repo, no relay)
 
+# Fixed 2026-09-14, two independent bugs, both measured live before being
+# fixed (not guessed):
+#
+# 1. GitHub Actions expression strings have NO escape sequences --
+#    endsWith(body, '@agy\n') matches the literal characters backslash-n,
+#    never a real trailing newline, so a real issue/comment body (which
+#    always ends in an actual newline once GitHub normalizes it) could
+#    never match. Replaced with a real bash check in a separate
+#    check-marker job, same pattern already used to fix this identical bug
+#    in Claud-Cloud-Project's and Mohammadlali/agw-workers's own copies of
+#    this file earlier the same day.
+# 2. `author_association == 'OWNER'` can never be true for issues this
+#    repo's own dashboard chat creates: status-dashboard/api/agy_create.js
+#    posts using AGY_CHAT_ACC0_PAT (the Mohammadlali account), which has NO
+#    relationship at all to this repo (owned by mohammadlali0707-stack) --
+#    confirmed by reading a real such issue (#8) back: author_association
+#    was "NONE", not even "COLLABORATOR" (unlike Claud-Cloud-Project, where
+#    the same PAT/repo-ownership combination reads back as COLLABORATOR).
+#    Rather than adding Mohammadlali as a collaborator on this repo (a real
+#    permissions change outside this fix's scope), trust by login name
+#    instead for that one known account, same as the existing
+#    `user.login == 'claude[bot]'` carve-out just below already does for
+#    comments.
+
 on:
   issues:
     types: [opened]
@@ -12,17 +36,69 @@ permissions:
   contents: read
 
 jobs:
+  check-marker:
+    runs-on: ubuntu-latest
+    if: always()
+    outputs:
+      match: ${{ steps.check.outputs.match }}
+      target_repo: ${{ steps.check.outputs.target_repo }}
+      acc_index: ${{ steps.check.outputs.acc_index }}
+    steps:
+      - name: Check for a trailing @agy marker and extract project tag
+        id: check
+        env:
+          BODY: ${{ github.event.issue.body || github.event.comment.body || '' }}
+          TITLE: ${{ github.event.issue.title || '' }}
+        run: |
+          # Combine title and body, then check if it ends with @agy
+          # We look for <project> @agy at the end.
+          TRIMMED="$(printf '%s\n%s' "$TITLE" "$BODY" | sed -e 's/[[:space:]]*$//')"
+          LOWER="$(printf '%s' "$TRIMMED" | tr '[:upper:]' '[:lower:]')"
+          case "$LOWER" in
+            *"@agy") 
+              echo "match=true" >> "$GITHUB_OUTPUT" 
+              
+              # Extract the project tag which is the word right before @agy
+              PROJECT=$(echo "$LOWER" | grep -oE '(ccp|cr|coffeenet|status)[[:space:]]+@agy$' | awk '{print $1}')
+              TARGET_REPO=""
+              
+              case "$PROJECT" in
+                ccp) TARGET_REPO="mohammadlali0707-stack/Claud-Cloud-Project" ;;
+                cr) TARGET_REPO="mohammadlali0707-stack/Control-Room" ;;
+                coffeenet) TARGET_REPO="mohammadlali0707-stack/AirboxVIP_Coffeenet" ;;
+                status) TARGET_REPO="Mohammadlali/status-dashboard" ;;
+                *) TARGET_REPO="mohammadlali0707-stack/Control-Room" ;; # fallback
+              esac
+              
+              # Pick a random worker from 1 to 8
+              ACC_IDX=$(( (RANDOM % 8) + 1 ))
+              
+              echo "target_repo=$TARGET_REPO" >> "$GITHUB_OUTPUT"
+              echo "acc_index=$ACC_IDX" >> "$GITHUB_OUTPUT"
+              ;;
+            *) 
+              echo "match=false" >> "$GITHUB_OUTPUT" 
+              ;;
+          esac
+
   agy-same-repo:
+    needs: [check-marker]
     runs-on: ubuntu-latest
     if: >
       (github.event_name == 'issues' &&
-        (endsWith(github.event.issue.body, '@agy') || endsWith(github.event.issue.body, '@agy\n') || endsWith(github.event.issue.body, '@agy\r\n')) &&
-        github.event.issue.author_association == 'OWNER'
+        needs.check-marker.outputs.match == 'true' &&
+        (github.event.issue.author_association == 'OWNER' ||
+          github.event.issue.author_association == 'COLLABORATOR' ||
+          github.event.issue.user.login == 'Mohammadlali')
       ) ||
       (github.event_name == 'issue_comment' &&
-        (endsWith(github.event.comment.body, '@agy') || endsWith(github.event.comment.body, '@agy\n') || endsWith(github.event.comment.body, '@agy\r\n')) &&
+        needs.check-marker.outputs.match == 'true' &&
         (
-          (github.event.comment.user.type != 'Bot' && github.event.comment.author_association == 'OWNER') ||
+          (github.event.comment.user.type != 'Bot' &&
+            (github.event.comment.author_association == 'OWNER' ||
+              github.event.comment.author_association == 'COLLABORATOR' ||
+              github.event.comment.user.login == 'Mohammadlali')
+          ) ||
           github.event.comment.user.login == 'claude[bot]'
         )
       )
@@ -30,10 +106,12 @@ jobs:
       - name: Ack on the issue
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_REPO: ${{ needs.check-marker.outputs.target_repo }}
+          ACC_IDX: ${{ needs.check-marker.outputs.acc_index }}
         run: |
           gh issue comment "${{ github.event.issue.number }}" \
             --repo "${{ github.repository }}" \
-            --body "AGY is on it (same-repo listener, no relay)."
+            --body "Project Manager: Routing to **$TARGET_REPO** via worker **ACC$ACC_IDX**."
 
       - name: Build prompt
         id: prompt
@@ -52,7 +130,6 @@ jobs:
             printf 'TASK - Issue #%s: %s\n' "$ISSUE_NUM" "$SAFE_TITLE"
             printf '%s\n' "$SAFE_BODY"
             printf '%s\n' 'If this task needs an image or video asset, do not try to generate it yourself and do not ask for GitHub access to do so. Print a line starting exactly with ##MEDIA_REQUEST## followed by a one-line description of what is needed, then continue the rest of your task without waiting for it. Something else will open the request for you.'
-            printf '%s\n' 'When you have COMPLETELY finished this task -- not a partial draft, nothing left to do -- end your final message with the line "@claude" on its own line, so Claude can continue from your result. If you are not fully done, do not include that line.'
             if [ -n "$SAFE_COMMENT" ]; then
               printf '%s\n' 'LATEST COMMENT:'
               printf '%s\n' "$SAFE_COMMENT"
@@ -63,13 +140,15 @@ jobs:
       - name: Dispatch agw-worker.yml in this same repo
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_REPO: ${{ needs.check-marker.outputs.target_repo }}
+          ACC_IDX: ${{ needs.check-marker.outputs.acc_index }}
         run: |
           PROMPT=$(cat /tmp/prompt.txt)
           gh workflow run agw-worker.yml \
             --repo "${{ github.repository }}" \
             --field "prompt=$PROMPT" \
-            --field "target_repo=mohammadlali0707-stack/Control-Room" \
+            --field "target_repo=$TARGET_REPO" \
             --field "target_branch=" \
-            --field "acc_index=0" \
+            --field "acc_index=$ACC_IDX" \
             --field "issue_number=${{ github.event.issue.number }}" \
             --field "callback_id=same-repo-${{ github.event.issue.number }}-${{ github.run_id }}"
