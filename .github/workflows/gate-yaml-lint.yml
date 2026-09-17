@@ -21,12 +21,12 @@ jobs:
           echo "=== Checking for CRLF line endings ==="
           CRLF_FILES=$(grep -rlU $'\r' .github/workflows/ 2>/dev/null || true)
           if [ -n "$CRLF_FILES" ]; then
-            echo "âŒ CRLF line endings found in:"
+            echo "❌ CRLF line endings found in:"
             echo "$CRLF_FILES"
             echo "Fix with: sed -i 's/\r//' <file>"
             exit 1
           fi
-          echo "âœ… No CRLF issues found"
+          echo "✅ No CRLF issues found"
 
       - name: Install yamllint + pyyaml
         run: pip3 install yamllint pyyaml --quiet || true
@@ -40,10 +40,10 @@ jobs:
             echo -n "Checking $f ... "
             python3 -c "import yaml, sys; yaml.safe_load(open('$f'))" 2>&1
             if [ $? -ne 0 ]; then
-              echo "âŒ YAML syntax error in $f"
+              echo "❌ YAML syntax error in $f"
               FAILED=1
             else
-              echo "âœ…"
+              echo "✅"
             fi
           done
           if [ "$FAILED" -eq 1 ]; then exit 1; fi
@@ -63,16 +63,16 @@ jobs:
           jobs = data.get('jobs', {})
           for jname, jbody in jobs.items():
               if not jbody or not jbody.get('steps'):
-                  print(f"âŒ {f}: job '{jname}' has no steps")
+                  print(f"❌ {f}: job '{jname}' has no steps")
                   sys.exit(1)
           PYEOF
             if [ $? -ne 0 ]; then FAILED=1; fi
           done
           if [ "$FAILED" -eq 1 ]; then exit 1; fi
-          echo "âœ… All workflow structures valid"
+          echo "✅ All workflow structures valid"
 
-      # â”€â”€ Ported from CR/Tools/check_workflow_safety.py â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-      # CHECK-1: double-quotes in single-quoted printf content (breaks agw-worker bash injection)
+      # ── Ported from CR/Tools/check_workflow_safety.py ──────────────────────
+      # CHECK-1: RETIRED -- replaced by Tools/check_run_injection.py (see below)
       # CHECK-2: python3 -c inline code at wrong indentation (causes name=path registration bug)
       # CHECK-3: YAML parse (redundant safety net with yamllint step above)
       - name: Workflow safety checks (CR ported)
@@ -81,12 +81,12 @@ jobs:
           python3 - <<'PYEOF'
           import sys, re, os, glob, yaml
 
-          C_FAIL = "âŒ"
-          C_OK   = "âœ…"
+          C_FAIL = "❌"
+          C_OK   = "✅"
           _CHAR_CLASS_PATTERNS = ("tr -d", "tr -", "sed ", "| tr", "| sed")
 
           def check_1_double_quotes_in_printf(filepath, lines):
-              """double-quotes inside single-quoted printf content strings â†’ breaks agw-worker"""
+              """double-quotes inside single-quoted printf content strings → breaks agw-worker"""
               errors = []
               for i, raw_line in enumerate(lines, 1):
                   line = raw_line.strip()
@@ -104,13 +104,29 @@ jobs:
               return errors
 
           def check_2_python_inline_yaml_indent(filepath, lines):
-              """python3 -c at wrong indent â†’ YAML block terminates early â†’ name=path bug"""
+              """python3 -c at wrong indent → YAML block terminates early → name=path bug"""
+              # The marker is ASSEMBLED, never written out, so this gate cannot
+              # match its own source. It did: the guard below and the fix above
+              # both contained the literal, and scanning this file reported 70
+              # phantom findings against its own code.
+              PY_C = "python3 " + "-c "
               errors = []
               for i, raw_line in enumerate(lines, 1):
                   line = raw_line.rstrip()
-                  if 'python3 -c "' not in line and "python3 -c '" not in line:
+                  if PY_C + '"' not in line and PY_C + "'" not in line:
                       continue
                   py_cmd_indent = len(line) - len(line.lstrip())
+                  # Only an UNCLOSED quote opens a continuation block. A command that
+                  # closes its own quote on the same line opens nothing, and neither
+                  # does a line where `python3 -c ` is just text (this gate mentions
+                  # it in its own message string). Without this the scan never finds
+                  # a closing quote, runs to EOF, and reports every later line that
+                  # is less indented: 12 findings against `fi`/`done`/`sleep 15` in
+                  # test-agy-chat-live.yml, and 70 more against this very file.
+                  after = line.split(PY_C, 1)[-1]
+                  quote = after[:1]
+                  if quote not in ('"', "'") or quote in after[1:]:
+                      continue
                   j = i
                   while j < len(lines):
                       next_raw = lines[j]
@@ -125,7 +141,7 @@ jobs:
                       if next_indent < py_cmd_indent and next_stripped:
                           errors.append((j + 1,
                               f"[CHECK-2] python3 -c inline code at col {next_indent} "
-                              f"(need >={py_cmd_indent} to stay in YAML block â€” causes name=path registration bug)",
+                              f"(need >={py_cmd_indent} to stay in YAML block — causes name=path registration bug)",
                               next_stripped[:80]))
                       j += 1
               return errors
@@ -146,7 +162,14 @@ jobs:
               except OSError as e:
                   return [(0, "cannot read file", str(e))]
               lines = content.splitlines()
-              errors += check_1_double_quotes_in_printf(filepath, lines)
+              # CHECK-1 retired 2026-09-17. It forbade double quotes in printf
+              # content as a PROXY for an untrusted expression being pasted
+              # straight into a script body, which is what used to set PROMPT.
+              # agw-worker.yml passes that through env: now, so the proxy only
+              # fired on legitimate JSON templates. The real rule lives in
+              # Tools/check_run_injection.py -- which, correctly, rejected an
+              # earlier version of THIS comment for spelling the expression out
+              # inside a run: body, where GitHub would have expanded it.
               errors += check_2_python_inline_yaml_indent(filepath, lines)
               errors += check_3_yaml_syntax(filepath, content)
               return errors
@@ -174,15 +197,15 @@ jobs:
               print(f"{C_OK} check_workflow_safety passed ({len(files)} files checked)")
           PYEOF
 
-      # â”€â”€ Ported from CR/Tools/check_heredoc_backticks.py â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-      # Unescaped backtick inside an unquoted heredoc â†’ silent command substitution
+      # ── Ported from CR/Tools/check_heredoc_backticks.py ────────────────────
+      # Unescaped backtick inside an unquoted heredoc → silent command substitution
       - name: Check for unescaped backticks in heredocs (CR ported)
         run: |
           echo "=== Heredoc Backtick Check (ported from CR/Tools/check_heredoc_backticks.py) ==="
           python3 - <<'PYEOF'
           import sys, re, glob
 
-          # Unquoted heredoc delimiter patterns (expansion IS active â†’ backtick is dangerous)
+          # Unquoted heredoc delimiter patterns (expansion IS active → backtick is dangerous)
           _HEREDOC_START = re.compile(r'<<\s*([A-Za-z_][A-Za-z0-9_]*)\b')
           _HEREDOC_QUOTED = re.compile(r"<<\s*['\\\"]")
 
@@ -201,7 +224,7 @@ jobs:
                   if not in_heredoc:
                       # Check for unquoted heredoc start
                       if _HEREDOC_QUOTED.search(stripped):
-                          continue  # quoted â†’ safe, skip
+                          continue  # quoted → safe, skip
                       m = _HEREDOC_START.search(stripped)
                       if m:
                           in_heredoc = True
@@ -216,7 +239,7 @@ jobs:
                       s = stripped
                       while col < len(s):
                           if s[col] == '\\':
-                              col += 2  # escaped â€” skip next char
+                              col += 2  # escaped — skip next char
                               continue
                           if s[col] == '`':
                               errors.append((i, stripped.strip()[:80]))
@@ -235,10 +258,26 @@ jobs:
                   all_errors.append(f"{fp}:{lineno}: unescaped backtick in unquoted heredoc\n        snippet: {snippet}")
 
           if all_errors:
-              print(f"âŒ check_heredoc_backticks FAILED ({len(all_errors)} issue(s))")
+              print(f"❌ check_heredoc_backticks FAILED ({len(all_errors)} issue(s))")
               for e in all_errors:
-                  print(f"  âŒ {e}")
+                  print(f"  ❌ {e}")
               sys.exit(1)
           else:
-              print(f"âœ… check_heredoc_backticks passed ({len(files)} files checked)")
+              print(f"✅ check_heredoc_backticks passed ({len(files)} files checked)")
           PYEOF
+
+      # CHECK-4: a context used where GitHub evaluates it before any step runs.
+      # Not a YAML error and not visible by reading -- the workflow simply never
+      # starts, with zero jobs and no log. Shipped in four files on 2026-09-17
+      # and survived three separate reviews. See Tools/check_job_env_contexts.py.
+      - name: Job-level context availability
+        run: python3 Tools/check_job_env_contexts.py .github/workflows
+
+      # Replaces the retired CHECK-1. Flags an untrusted ${{ }} interpolated
+      # into a run: body -- the injection vector itself rather than a proxy for
+      # it. Ratcheted against Tools/injection_baseline.json: the 30 existing
+      # locations are reported, only something NEW fails. A gate that goes red
+      # on a backlog gets ignored, which is how CHECK-2 stopped protecting
+      # anything.
+      - name: No new untrusted expression in a run body
+        run: python3 Tools/check_run_injection.py .github/workflows
