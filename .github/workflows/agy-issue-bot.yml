@@ -37,7 +37,7 @@ permissions:
 
 jobs:
   check-marker:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     if: always()
     outputs:
       match: ${{ steps.check.outputs.match }}
@@ -62,11 +62,18 @@ jobs:
               PROJECT=$(echo "$LOWER" | grep -oE '(ccp|cr|coffeenet|status)[[:space:]]+@agy$' | awk '{print $1}')
               TARGET_REPO=""
               
+              # Every project repo below is owned by mohammadlali0707-stack
+              # (ACC6) as of 2026-09-17: the owner moved the last one still
+              # under Mohammadlali (ACC0), status-dashboard, over to ACC6.
+              # Nothing here needs a token of its own -- agw-worker.yml
+              # resolves one from the owner (ACC6_PAT for anything that is
+              # not Mohammadlali/agw-workers), so an ACC6-owned target is
+              # already wired correctly by that default branch.
               case "$PROJECT" in
                 ccp) TARGET_REPO="mohammadlali0707-stack/Claud-Cloud-Project" ;;
                 cr) TARGET_REPO="mohammadlali0707-stack/Control-Room" ;;
                 coffeenet) TARGET_REPO="mohammadlali0707-stack/AirboxVIP_Coffeenet" ;;
-                status) TARGET_REPO="Mohammadlali/status-dashboard" ;;
+                status) TARGET_REPO="mohammadlali0707-stack/status-dashboard" ;;
                 *) TARGET_REPO="mohammadlali0707-stack/Control-Room" ;; # fallback
               esac
               
@@ -83,7 +90,7 @@ jobs:
 
   agy-same-repo:
     needs: [check-marker]
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     if: >
       (github.event_name == 'issues' &&
         needs.check-marker.outputs.match == 'true' &&
