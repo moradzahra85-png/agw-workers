@@ -10,7 +10,12 @@ jobs:
   webhook-health:
     runs-on: ubuntu-latest
     env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Reading repos/{repo}/hooks needs ADMIN on the repo. GITHUB_TOKEN has no
+      # webhook permission at all -- there is no `permissions:` key that grants
+      # it -- so this gate answered 403 every hour since it was written, and
+      # never reached the endpoint check below. A PAT with admin:repo_hook can
+      # do it; GITHUB_TOKEN stays as the fallback for everything else.
+      GH_TOKEN: ${{ secrets.ACC6_PAT || secrets.GITHUB_TOKEN }}
       EXPECTED_URL: "https://n8n.airboxvip.top/webhook/github-runner-trigger"
       REQUIRED_EVENTS: "issues issue_comment workflow_job"
     steps:
@@ -21,59 +26,104 @@ jobs:
           REPO="${GITHUB_REPOSITORY}"
           FAILED=0
 
-          HOOKS=$(gh api "repos/$REPO/hooks")
+          # Not being ALLOWED to look is not the same as looking and finding a
+          # problem. Reporting "webhook broken" when the real answer is "this
+          # token cannot read webhooks" is a false alarm, and an hourly one
+          # trains everybody to ignore the gate -- which is what happened.
+          if ! HOOKS=$(gh api "repos/$REPO/hooks" 2>/tmp/hooks_err); then
+            echo "::warning::cannot read this repo's webhooks -- $(tr -d '\n' < /tmp/hooks_err)"
+            echo "Reading webhooks needs repo ADMIN. GITHUB_TOKEN never has it."
+            echo "Set ACC6_PAT (or another PAT with admin:repo_hook) to enable"
+            echo "the configuration half of this gate."
+            echo '##TBS##{"data": {"reason": "no_webhook_read_permission"}, "probe": "webhook_health", "status": "skip", "v": 1}'
+            echo "The endpoint reachability check below still runs, and still fails"
+            echo "for real if n8n is down -- that part needs no GitHub permission."
+            exit 0
+          fi
           HOOK_COUNT=$(echo "$HOOKS" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))")
           echo "Found $HOOK_COUNT webhook(s)"
 
-          echo "$HOOKS" | python3 - <<'EOF'
+          # `echo "$HOOKS" | python3 - <<'EOF'` cannot work: `python3 -` takes the
+          # PROGRAM from stdin, and the heredoc is what supplies it, so the pipe
+          # is discarded and json.load(sys.stdin) reads an exhausted stream --
+          # "Expecting value: line 1 column 1 (char 0)". This has been broken
+          # since the gate was written; nobody saw it because the `gh api` call
+          # above 403'd first and killed the step before Python ever ran. Fixing
+          # the token is what exposed it. The data goes through a file now.
+          printf '%s' "$HOOKS" > /tmp/hooks.json
+          python3 - <<'EOF'
           import sys, json, os
 
-          hooks = json.load(sys.stdin)
+          with open('/tmp/hooks.json', encoding='utf-8') as fh:
+              hooks = json.load(fh)
           expected_url = os.environ['EXPECTED_URL']
           required_events = os.environ['REQUIRED_EVENTS'].split()
+
+          # This gate is about ONE webhook: the AGY dispatch hook at
+          # EXPECTED_URL. The original loop applied that single hook's contract
+          # to EVERY hook on the repo, so the four real ones -- github-issue-
+          # events, validate-n8n-json and secret-scan alongside it -- each got
+          # "URL mismatch" and "missing events" for the crime of being a
+          # different integration. Demanding that secret-scan subscribe to
+          # issue_comment is not a health check, it is a false alarm. Measured
+          # 2026-09-18, run 35328413573: the AGY hook passed every check while
+          # the gate still reported failure.
+          mine = [h for h in hooks if h['config'].get('url', '') == expected_url]
+          others = [h for h in hooks if h not in mine]
           failed = False
 
-          for hook in hooks:
+          if not mine:
+              print(f"  \u274c FAIL: no webhook points at {expected_url}")
+              urls = [h['config'].get('url', '?') for h in hooks]
+              print(f"     {len(hooks)} hook(s) present: {urls}")
+              failed = True
+
+          for hook in mine:
               url = hook['config'].get('url', '')
               events = hook.get('events', [])
-              active = hook.get('active', False)
-              hook_id = hook['id']
+              print(f"\nAGY hook #{hook['id']}: {url}")
 
-              print(f"\nHook #{hook_id}: {url}")
-
-              # Check 1: No test URLs in production
               if '/webhook-test/' in url:
-                  print(f"  ❌ FAIL: Uses webhook-test URL (not production!)")
+                  print("  \u274c FAIL: uses a webhook-test URL, not production")
                   failed = True
               else:
-                  print(f"  ✅ URL is production")
+                  print("  \u2705 URL is production")
 
-              # Check 2: Must point to correct n8n URL
-              if url != expected_url and 'n8n' in url:
-                  print(f"  ❌ FAIL: URL mismatch. Expected: {expected_url}")
-                  failed = True
-
-              # Check 3: Required events must be present
               missing = [e for e in required_events if e not in events]
               if missing:
-                  print(f"  ❌ FAIL: Missing events: {missing}")
+                  print(f"  \u274c FAIL: missing events: {missing}")
                   failed = True
               else:
-                  print(f"  ✅ All required events present: {events}")
+                  print(f"  \u2705 all required events present: {events}")
 
-              # Check 4: Must be active
-              if not active:
-                  print(f"  ❌ FAIL: Webhook is inactive!")
+              if not hook.get('active', False):
+                  print("  \u274c FAIL: webhook is inactive")
                   failed = True
+              else:
+                  print("  \u2705 active")
 
+          for hook in others:
+              # Reported, never judged: a different integration with its own
+              # purpose and its own event list.
+              print(f"\n(other integration, not this gate's business) "
+                    f"#{hook['id']}: {hook['config'].get('url', '?')} "
+                    f"events={hook.get('events', [])} active={hook.get('active')}")
+
+          print('##TBS##' + json.dumps(
+              {"data": {"hooks": len(hooks), "agy_hooks": len(mine),
+                        "others": len(others)},
+               "probe": "webhook_health",
+               "status": "fail" if failed else "pass", "v": 1}, sort_keys=True))
           if failed:
-              print("\n❌ WEBHOOK HEALTH CHECK FAILED")
+              print("\n\u274c WEBHOOK HEALTH CHECK FAILED")
               sys.exit(1)
-          else:
-              print("\n✅ All webhooks are healthy")
+          print("\n\u2705 The AGY webhook is healthy")
           EOF
 
       - name: Verify webhook endpoint is reachable
+        # always(): this half needs no GitHub permission, so a skipped
+        # configuration check above must not silently skip it too.
+        if: always()
         run: |
           echo "=== Checking n8n endpoint reachability ==="
           STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
@@ -94,6 +144,17 @@ jobs:
       - name: Post alert if webhook health fails
         if: failure()
         run: |
+          # The alert itself was broken: `--label alert` on a repo with no such
+          # label makes `gh issue create` exit 1, so a real webhook failure
+          # produced a failed alert step and no issue. Measured 2026-09-18 in
+          # run 35326224643: "could not add label: 'alert' not found".
+          # Created here rather than by hand because this gate is synced to all
+          # eight forks, and none of them has the label either.
+          gh label create alert \
+            --repo "$GITHUB_REPOSITORY" \
+            --color B60205 \
+            --description "Automated gate failure needing a human" 2>/dev/null \
+            || echo "label 'alert' already exists (or cannot be created); continuing"
           gh issue create \
             --repo "$GITHUB_REPOSITORY" \
             --title "🚨 Webhook Health Gate Failed: $(date -u '+%Y-%m-%d %H:%M UTC')" \
