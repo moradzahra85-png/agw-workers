@@ -220,7 +220,7 @@ jobs:
           fi
           echo "$TOKEN_B64" | base64 -d > ~/.gemini/antigravity-cli/antigravity-oauth-token
           chmod 600 ~/.gemini/antigravity-cli/antigravity-oauth-token
-          printf '%s' "${AGW_INSTALL_ID_ACC8}" > ~/.gemini/antigravity-cli/installation_id
+          printf '%s' "${AGW_INSTALL_ID_ACC6}" > ~/.gemini/antigravity-cli/installation_id
           echo '{"userSettings":{}}' > ~/.gemini/config/config.json
 
       - name: Build the lead-planning prompt
