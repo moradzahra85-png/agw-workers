@@ -72,6 +72,11 @@ on:
         required: false
         default: ''
         type: string
+      chat_mode:
+        description: '1 = plain chat call from the HQ gemini-proxy (no planning wrapper, no failover/relay; caller retries)'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
@@ -228,6 +233,7 @@ jobs:
           PROMPT_INPUT: ${{ inputs.prompt }}
           PRIMARY_IDX: ${{ steps.pick_token.outputs.acc_idx }}
           MODEL_INPUT: ${{ inputs.model }}
+          CHAT_MODE: ${{ inputs.chat_mode }}
         run: |
           set +e
           restore_token() {
@@ -258,6 +264,13 @@ jobs:
           is_quota_error() {
             grep -qiE 'too many requests|rate limit|rate-limit|429|quota' "$1"
           }
+          if [ "$CHAT_MODE" = "1" ]; then
+            {
+              printf '%s\n' "You are being used as a plain chat model by an API. Reply ONLY with the answer text the request below asks for (keep any requested format such as JSON exactly). Do not create or edit files and do not run commands unless the request explicitly requires it."
+              printf '\n%s\n\n' "---"
+              printf '%s\n' "$PROMPT_INPUT"
+            } > /tmp/agy_prompt.txt
+          else
           {
             printf '%s\n' "You are running inside a git checkout at ${AGENT_REPO}, which is your working directory."
             printf '\n%s\n' "WHERE TO PUT FILES -- this is not advice:"
@@ -279,6 +292,7 @@ jobs:
             printf '\n%s\n\n' "---"
             printf '%s\n' "$PROMPT_INPUT"
           } > /tmp/agy_prompt.txt
+          fi
           PROMPT=$(cat /tmp/agy_prompt.txt)
           USED_IDX="$PRIMARY_IDX"
           restore_token "$USED_IDX" || exit 1
@@ -301,9 +315,15 @@ jobs:
           elif [ ! -s /tmp/agy_output.txt ]; then
             AGY_OK=false
             FAILURE_REASON="empty-output"
-          elif grep -qiE 'too many requests|rate limit|rate-limit|429|quota|unauthorized|authentication failed|invalid (api key|token)|not logged in|timeout waiting|timed out' /tmp/agy_output.txt; then
+          elif [ "$CHAT_MODE" = "1" ] && [ "$(wc -c < /tmp/agy_output.txt)" -lt 600 ] && grep -qiE 'too many requests|rate limit|rate-limit|429|quota|unauthorized|authentication failed|invalid (api key|token)|not logged in|timeout waiting|timed out|invalid model selection' /tmp/agy_output.txt; then
             AGY_OK=false
             FAILURE_REASON="technical-error-in-output"
+          elif [ "$CHAT_MODE" != "1" ] && grep -qiE 'too many requests|rate limit|rate-limit|429|quota|unauthorized|authentication failed|invalid (api key|token)|not logged in|timeout waiting|timed out' /tmp/agy_output.txt; then
+            AGY_OK=false
+            FAILURE_REASON="technical-error-in-output"
+          fi
+          if [ "$AGY_OK" != "true" ] && [ "$CHAT_MODE" = "1" ]; then
+            printf '\n##AGY_FAIL## %s\n' "$FAILURE_REASON" >> /tmp/agy_output.txt
           fi
           if [ "$AGY_OK" != "true" ]; then
             echo "::error::AGY technical failure on acc${USED_IDX}: ${FAILURE_REASON}; requesting cross-account failover through ACC6"
@@ -314,7 +334,7 @@ jobs:
           echo "Output lines: $(wc -l < /tmp/agy_output.txt)"
 
       - name: Route technical failure through ACC6
-        if: steps.run_agy.outputs.agy_ok != 'true'
+        if: steps.run_agy.outputs.agy_ok != 'true' && inputs.chat_mode != '1'
         env:
           GH_TOKEN: ${{ secrets.ACC6_PAT }}
           PROMPT_INPUT: ${{ inputs.prompt }}
@@ -338,7 +358,7 @@ jobs:
           echo "Failover request sent to ACC6 router."
 
       - name: Relay any media request from agy's output
-        if: always() && steps.run_agy.outputs.agy_ok == 'true'
+        if: always() && steps.run_agy.outputs.agy_ok == 'true' && inputs.chat_mode != '1'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
