@@ -42,7 +42,7 @@ jobs:
           mkdir -p /tmp/gwlib && tar xzf tools/gemini_webapi.tgz -C /tmp/gwlib
       - name: Ask Gemini
         env:
-          GEMINI_WEB_COOKIES: ${{ secrets.GEMINI_WEB_COOKIES }}
+          GEMINI_WEB_COOKIES: ${{ secrets.GEMINI_WEB_COOKIES_ALT || secrets.GEMINI_WEB_COOKIES }}
           PROMPT_INPUT: ${{ inputs.prompt }}
           MODEL_INPUT: ${{ inputs.model }}
           LEVEL_INPUT: ${{ inputs.level }}
