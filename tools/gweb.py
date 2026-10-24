@@ -24,7 +24,10 @@ async def main():
     try: await c.init(timeout=1500, auto_refresh=False)
     except Exception as e: return done("", f"init {type(e).__name__}: {str(e)[:200]}")
     alias = {CANON.get(m.model_number, m.model_name): m.model_name for m in (c.list_models() or []) if m.is_available}
-    if len(alias) <= 1: return done("", "signed_out (cookies expired)")
+    if len(alias) <= 1:
+        ms = c.list_models() or []
+        diag = f"keys={sorted(ck)[:20]} n_models={len(ms)} models={[(m.model_number, m.model_name, m.is_available) for m in ms][:8]} status={getattr(c, 'account_status', '?')}"
+        return done("", "signed_out (cookies expired?) " + diag)
     if web_model not in alias: return done("", f"model {web_model} not available on this account ({sorted(alias)})")
     REQ_OVERRIDES.set({"inner": {80: level}, "think": level})
     out = []
