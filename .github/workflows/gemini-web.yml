@@ -1,0 +1,61 @@
+name: Gemini Web
+
+# One Gemini-website chat call (Argon / Pro / Flash) using this account's Chrome cookies
+# (secret GEMINI_WEB_COOKIES). Dispatched by the HQ gemini-proxy; output in artifact gweb-output-<callback_id>.
+on:
+  workflow_dispatch:
+    inputs:
+      prompt:
+        description: 'Prompt text'
+        required: true
+        type: string
+      model:
+        description: 'gemini-argon | gemini-pro | gemini-flash'
+        required: false
+        default: 'gemini-argon'
+        type: string
+      level:
+        description: 'thinking level 1=low 4=medium 2=high'
+        required: false
+        default: '2'
+        type: string
+      callback_id:
+        description: 'id used in the artifact name'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: tools
+      - name: Install client
+        run: |
+          python3 -m venv /tmp/gv
+          /tmp/gv/bin/pip install -q curl_cffi==0.16.3 loguru==0.7.3 orjson==3.11.9 pydantic==2.12.5
+          mkdir -p /tmp/gwlib && tar xzf tools/gemini_webapi.tgz -C /tmp/gwlib
+      - name: Ask Gemini
+        env:
+          GEMINI_WEB_COOKIES: ${{ secrets.GEMINI_WEB_COOKIES }}
+          PROMPT_INPUT: ${{ inputs.prompt }}
+          MODEL_INPUT: ${{ inputs.model }}
+          LEVEL_INPUT: ${{ inputs.level }}
+        run: |
+          printf '%s' "$PROMPT_INPUT" > /tmp/gweb_prompt.txt
+          PYTHONPATH=/tmp/gwlib timeout 2100 /tmp/gv/bin/python tools/gweb.py /tmp/gweb_prompt.txt "${MODEL_INPUT:-gemini-argon}" "${LEVEL_INPUT:-2}" /tmp/gweb_output.txt 2>/tmp/gweb_err.txt && rc=0 || rc=$?
+          [ -s /tmp/gweb_output.txt ] || echo "##GWEB_FAIL## runner rc=$rc $(grep -oE '[A-Za-z]+(Error|Exception)' /tmp/gweb_err.txt | tail -1)" > /tmp/gweb_output.txt
+          echo "rc=$rc bytes=$(wc -c < /tmp/gweb_output.txt)"
+          exit 0
+      - name: Upload output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gweb-output-${{ inputs.callback_id }}
+          path: /tmp/gweb_output.txt
+          retention-days: 1
