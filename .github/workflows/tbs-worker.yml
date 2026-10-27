@@ -46,7 +46,7 @@ concurrency:
 
 jobs:
   plan:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.build.outputs.matrix }}
       parallel: ${{ steps.build.outputs.parallel }}
@@ -73,8 +73,7 @@ jobs:
 
   work:
     needs: plan
-    runs-on: self-hosted
-    # Everything this job needs -- python, git, the agy binary -- is already
+    runs-on: ubuntu-latest
     # in the image, so there is no install step and nothing to cache. Pin
     # vars.TBS_WORKER_IMAGE to an IMMUTABLE tag (the sha the image workflow
     # prints), never to :latest. A fleet on a moving tag upgrades itself with
