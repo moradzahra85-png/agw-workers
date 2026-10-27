@@ -58,7 +58,7 @@ permissions:
 jobs:
   refresh-feed:
     name: Regenerate status.json and publish it to the status gist (from agw-workers)
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
       # ACC0_PAT stays: collect_status_feed.py (run further down, inheriting
