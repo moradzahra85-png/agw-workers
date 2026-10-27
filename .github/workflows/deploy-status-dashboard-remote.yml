@@ -39,7 +39,7 @@ permissions:
 
 jobs:
   deploy:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
       ACC6_PAT: ${{ secrets.ACC6_PAT }}
